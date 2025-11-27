@@ -97,15 +97,22 @@ class ExportHandler:
         lines = text.split('\n')
         current_block = {'type': 'text', 'content': [], 'language': '', 'level': 0}
         in_code_block = False
-        code_language = ''
+        in_table = False
+        table_rows = []
 
-        for line in lines:
+        for i, line in enumerate(lines):
             stripped = line.strip()
             
             # Check for code block start/end
             if stripped.startswith('```'):
+                if in_table:
+                    # End table before code block
+                    if table_rows:
+                        blocks.append({'type': 'table', 'content': table_rows, 'language': '', 'level': 0})
+                        table_rows = []
+                    in_table = False
+                
                 if not in_code_block:
-                    # Save current text block
                     if current_block['content']:
                         current_block['content'] = '\n'.join(current_block['content'])
                         blocks.append(current_block)
@@ -124,10 +131,37 @@ class ExportHandler:
                 current_block['content'].append(line)
                 continue
             
+            # Check for markdown table row
+            if '|' in stripped and stripped.startswith('|') and stripped.endswith('|'):
+                # Check if it's a separator row (|---|---|)
+                if re.match(r'^\|[\s\-:]+\|$', stripped.replace('|', '|').replace('-', '-')):
+                    # This is a separator row, skip it but mark we're in a table
+                    in_table = True
+                    continue
+                
+                # Parse table row
+                cells = [cell.strip() for cell in stripped.split('|')[1:-1]]
+                if cells:
+                    if not in_table:
+                        # Save current block before starting table
+                        if current_block['content']:
+                            current_block['content'] = '\n'.join(current_block['content'])
+                            blocks.append(current_block)
+                            current_block = {'type': 'text', 'content': [], 'language': '', 'level': 0}
+                        in_table = True
+                    table_rows.append(cells)
+                continue
+            
+            # If we were in a table and hit a non-table line, save the table
+            if in_table:
+                if table_rows:
+                    blocks.append({'type': 'table', 'content': table_rows, 'language': '', 'level': 0})
+                    table_rows = []
+                in_table = False
+            
             # Check for markdown headers (# ## ### etc.)
             header_match = re.match(r'^(#{1,6})\s+(.+)$', line)
             if header_match:
-                # Save current block
                 if current_block['content']:
                     current_block['content'] = '\n'.join(current_block['content'])
                     blocks.append(current_block)
@@ -141,7 +175,7 @@ class ExportHandler:
             # Check for bold headers like **Header**
             if stripped.startswith('**') and stripped.endswith('**') and len(stripped) > 4:
                 inner = stripped[2:-2]
-                if inner and not '**' in inner:
+                if inner and '**' not in inner:
                     if current_block['content']:
                         current_block['content'] = '\n'.join(current_block['content'])
                         blocks.append(current_block)
@@ -152,7 +186,10 @@ class ExportHandler:
             # Regular text
             current_block['content'].append(line)
 
-        # Don't forget the last block
+        # Don't forget remaining content
+        if in_table and table_rows:
+            blocks.append({'type': 'table', 'content': table_rows, 'language': '', 'level': 0})
+        
         if current_block['content']:
             if isinstance(current_block['content'], list):
                 current_block['content'] = '\n'.join(current_block['content'])
@@ -306,6 +343,15 @@ class ExportHandler:
             # Parse and format response
             blocks = self._parse_markdown_content(response)
 
+            # Table cell style
+            table_cell_style = ParagraphStyle(
+                'TableCell',
+                parent=styles['Normal'],
+                fontSize=9,
+                leading=12,
+                fontName='Helvetica',
+            )
+
             for block in blocks:
                 if block['type'] == 'code':
                     story.append(Spacer(1, 0.1 * inch))
@@ -333,6 +379,45 @@ class ExportHandler:
                         ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
                     ]))
                     story.append(t)
+                    story.append(Spacer(1, 0.1 * inch))
+
+                elif block['type'] == 'table':
+                    story.append(Spacer(1, 0.1 * inch))
+                    
+                    # Build table data with Paragraphs for text wrapping
+                    table_data = []
+                    for row_idx, row in enumerate(block['content']):
+                        table_row = []
+                        for cell in row:
+                            cell_text = cell.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                            # Handle bold in cells
+                            cell_text = re.sub(r'\*\*([^*]+)\*\*', r'<b>\1</b>', cell_text)
+                            cell_text = re.sub(r'`([^`]+)`', r'<font face="Courier" size="8">\1</font>', cell_text)
+                            table_row.append(Paragraph(cell_text, table_cell_style))
+                        table_data.append(table_row)
+                    
+                    if table_data:
+                        # Calculate column widths
+                        num_cols = len(table_data[0]) if table_data else 1
+                        col_width = 6.8 * inch / num_cols
+                        
+                        t = Table(table_data, colWidths=[col_width] * num_cols)
+                        t.setStyle(TableStyle([
+                            # Header row styling
+                            ('BACKGROUND', (0, 0), (-1, 0), HexColor('#4a90a4')),
+                            ('TEXTCOLOR', (0, 0), (-1, 0), HexColor('#ffffff')),
+                            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                            # All cells
+                            ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#cccccc')),
+                            ('LEFTPADDING', (0, 0), (-1, -1), 8),
+                            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+                            ('TOPPADDING', (0, 0), (-1, -1), 6),
+                            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+                            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                            # Alternating row colors
+                            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [HexColor('#ffffff'), HexColor('#f9f9f9')]),
+                        ]))
+                        story.append(t)
                     story.append(Spacer(1, 0.1 * inch))
 
                 elif block['type'] == 'heading':
