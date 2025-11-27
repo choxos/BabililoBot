@@ -7,7 +7,7 @@ from typing import Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import ContextTypes
 
-from src.config import get_settings, FREE_MODELS
+from src.config import get_settings, FREE_MODELS, FREE_MODELS_BY_CATEGORY
 from src.database.repository import Repository
 from src.services.conversation import ConversationManager
 from src.services.web_search import WebSearchService
@@ -97,26 +97,33 @@ class CommandHandler:
         await update.message.reply_text(help_text, parse_mode="Markdown")
 
     async def model_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /model command."""
+        """Handle /model command - show categories first."""
         if not update.effective_user or not update.message:
             return
 
         user = await self.repository.get_user_by_telegram_id(update.effective_user.id)
         current_model = user.selected_model if user else self.settings.openrouter_default_model
 
+        # Find current model name
+        current_name = current_model
+        for models in FREE_MODELS_BY_CATEGORY.values():
+            for mid, mname in models:
+                if mid == current_model:
+                    current_name = mname
+                    break
+
+        # Show category buttons
         keyboard = []
-        for model_id, model_name in FREE_MODELS:
-            is_selected = "✓ " if model_id == current_model else ""
+        for category in FREE_MODELS_BY_CATEGORY.keys():
             keyboard.append([
-                InlineKeyboardButton(
-                    f"{is_selected}{model_name}",
-                    callback_data=f"model:{model_id}"
-                )
+                InlineKeyboardButton(category, callback_data=f"modelcat:{category}")
             ])
 
         await update.message.reply_text(
             "🤖 **Select AI Model**\n\n"
-            f"Current: `{current_model}`",
+            f"Current: **{current_name}**\n"
+            f"`{current_model}`\n\n"
+            "Choose a category:",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown",
         )
@@ -127,18 +134,86 @@ class CommandHandler:
             return
 
         query = update.callback_query
-        await query.answer()
+        data = query.data
 
-        if not query.data or not query.data.startswith("model:"):
+        # Handle category selection
+        if data.startswith("modelcat:"):
+            await query.answer()
+            category = data[9:]  # Remove "modelcat:" prefix
+            
+            if category not in FREE_MODELS_BY_CATEGORY:
+                return
+
+            user = await self.repository.get_user_by_telegram_id(update.effective_user.id)
+            current_model = user.selected_model if user else self.settings.openrouter_default_model
+
+            models = FREE_MODELS_BY_CATEGORY[category]
+            keyboard = []
+            for model_id, model_name in models:
+                is_selected = "✓ " if model_id == current_model else ""
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"{is_selected}{model_name}",
+                        callback_data=f"model:{model_id}"
+                    )
+                ])
+            
+            # Add back button
+            keyboard.append([InlineKeyboardButton("⬅️ Back to Categories", callback_data="modelcat:back")])
+
+            await query.edit_message_text(
+                f"🤖 **{category}**\n\nSelect a model:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown",
+            )
             return
 
-        model_id = query.data[6:]
+        # Handle back to categories
+        if data == "modelcat:back":
+            await query.answer()
+            user = await self.repository.get_user_by_telegram_id(update.effective_user.id)
+            current_model = user.selected_model if user else self.settings.openrouter_default_model
+
+            current_name = current_model
+            for models in FREE_MODELS_BY_CATEGORY.values():
+                for mid, mname in models:
+                    if mid == current_model:
+                        current_name = mname
+                        break
+
+            keyboard = []
+            for category in FREE_MODELS_BY_CATEGORY.keys():
+                keyboard.append([
+                    InlineKeyboardButton(category, callback_data=f"modelcat:{category}")
+                ])
+
+            await query.edit_message_text(
+                "🤖 **Select AI Model**\n\n"
+                f"Current: **{current_name}**\n"
+                f"`{current_model}`\n\n"
+                "Choose a category:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown",
+            )
+            return
+
+        # Handle model selection
+        if not data.startswith("model:"):
+            return
+
+        await query.answer()
+        model_id = data[6:]
         await self.repository.update_user_model(update.effective_user.id, model_id)
 
-        model_name = next((n for m, n in FREE_MODELS if m == model_id), model_id)
+        model_name = model_id
+        for models in FREE_MODELS_BY_CATEGORY.values():
+            for mid, mname in models:
+                if mid == model_id:
+                    model_name = mname
+                    break
 
         await query.edit_message_text(
-            f"✅ Model: **{model_name}**\n`{model_id}`",
+            f"✅ Model changed!\n\n**{model_name}**\n`{model_id}`",
             parse_mode="Markdown",
         )
 

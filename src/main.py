@@ -113,6 +113,7 @@ async def post_init(application: Application) -> None:
 
     # ===== Callback Query Handlers =====
     application.add_handler(CallbackQueryHandler(command_handler.model_callback, pattern="^model:"))
+    application.add_handler(CallbackQueryHandler(command_handler.model_callback, pattern="^modelcat:"))
     application.add_handler(CallbackQueryHandler(command_handler.persona_callback, pattern="^persona:"))
     application.add_handler(CallbackQueryHandler(command_handler.favorites_callback, pattern="^fav:"))
     application.add_handler(CallbackQueryHandler(export_handler.handle_export_callback, pattern="^export:"))
