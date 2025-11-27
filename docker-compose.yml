@@ -1,0 +1,50 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: babililo_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: babililo
+      POSTGRES_PASSWORD: babililo_secret
+      POSTGRES_DB: babililo_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U babililo -d babililo_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - babililo_network
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: babililo_bot
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_DEFAULT_MODEL=${OPENROUTER_DEFAULT_MODEL:-google/gemma-3-27b-it:free}
+      - DATABASE_URL=postgresql+asyncpg://babililo:babililo_secret@postgres:5432/babililo_db
+      - ADMIN_USER_IDS=${ADMIN_USER_IDS:-[]}
+      - RATE_LIMIT_MESSAGES=${RATE_LIMIT_MESSAGES:-10}
+      - RATE_LIMIT_WINDOW_SECONDS=${RATE_LIMIT_WINDOW_SECONDS:-60}
+      - CONVERSATION_CONTEXT_SIZE=${CONVERSATION_CONTEXT_SIZE:-20}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    networks:
+      - babililo_network
+
+volumes:
+  postgres_data:
+
+networks:
+  babililo_network:
+    driver: bridge
+
