@@ -5,4 +5,13 @@ asyncpg==0.30.0
 alembic==1.14.0
 pydantic-settings==2.6.1
 python-dotenv==1.0.1
+aiosqlite==0.20.0
 
+# New features
+reportlab>=4.0.0
+pypdf2>=3.0.0
+python-docx>=1.0.0
+gtts>=2.5.0
+duckduckgo-search>=6.0.0
+Pillow>=10.0.0
+aiofiles>=24.1.0

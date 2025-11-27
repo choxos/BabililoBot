@@ -5,12 +5,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import AsyncGenerator, List, Optional
 
-from sqlalchemy import select, update, func
+from sqlalchemy import select, update, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import selectinload
 
 from src.config import get_settings
-from src.database.models import Base, Conversation, Message, User
+from src.database.models import Base, Conversation, Message, User, Persona, Favorite, GroupSettings, Document
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,27 @@ class Repository:
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         logger.info("Database tables initialized")
+        # Initialize preset personas
+        await self._init_preset_personas()
+
+    async def _init_preset_personas(self) -> None:
+        """Initialize preset personas."""
+        presets = [
+            ("Default", "You are BabililoBot, a helpful, friendly AI assistant."),
+            ("Coder", "You are an expert programmer. Provide clean, well-documented code with explanations. Focus on best practices and efficiency."),
+            ("Writer", "You are a creative writer. Help with storytelling, editing, and crafting compelling narratives."),
+            ("Tutor", "You are a patient teacher. Explain concepts clearly with examples, adapting to the student's level."),
+            ("Analyst", "You are a data analyst. Provide structured, logical analysis with clear insights and recommendations."),
+            ("Translator", "You are a multilingual translator. Provide accurate translations while preserving meaning and context."),
+        ]
+        async with self.session() as session:
+            for name, prompt in presets:
+                existing = await session.execute(
+                    select(Persona).where(Persona.name == name, Persona.is_preset == True)
+                )
+                if not existing.scalar_one_or_none():
+                    persona = Persona(name=name, system_prompt=prompt, is_preset=True)
+                    session.add(persona)
 
     async def close(self) -> None:
         """Close database connections."""
@@ -77,7 +98,6 @@ class Repository:
                 await session.flush()
                 logger.info(f"Created new user: {telegram_id}")
             else:
-                # Update user info if changed
                 user.username = username
                 user.first_name = first_name
                 user.last_name = last_name
@@ -95,6 +115,13 @@ class Repository:
         async with self.session() as session:
             await session.execute(
                 update(User).where(User.telegram_id == telegram_id).values(selected_model=model)
+            )
+
+    async def update_user_voice(self, telegram_id: int, enabled: bool) -> None:
+        """Update user's voice setting."""
+        async with self.session() as session:
+            await session.execute(
+                update(User).where(User.telegram_id == telegram_id).values(voice_enabled=enabled)
             )
 
     async def ban_user(self, telegram_id: int) -> bool:
@@ -144,44 +171,55 @@ class Repository:
             }
 
     # Conversation operations
-    async def get_or_create_active_conversation(self, telegram_id: int) -> Conversation:
+    async def get_or_create_active_conversation(
+        self, telegram_id: int, group_id: Optional[int] = None
+    ) -> Conversation:
         """Get active conversation or create new one."""
         async with self.session() as session:
-            # Get user
             user_result = await session.execute(select(User).where(User.telegram_id == telegram_id))
             user = user_result.scalar_one_or_none()
 
             if user is None:
                 raise ValueError(f"User with telegram_id {telegram_id} not found")
 
-            # Get active conversation
-            conv_result = await session.execute(
-                select(Conversation)
-                .where(Conversation.user_id == user.id, Conversation.is_active == True)
-                .options(selectinload(Conversation.messages))
+            # Get active conversation (for group or DM)
+            query = select(Conversation).where(
+                Conversation.user_id == user.id,
+                Conversation.is_active == True
             )
+            if group_id:
+                query = query.where(Conversation.group_id == group_id)
+            else:
+                query = query.where(Conversation.group_id.is_(None))
+
+            conv_result = await session.execute(query.options(selectinload(Conversation.messages)))
             conversation = conv_result.scalar_one_or_none()
 
             if conversation is None:
-                conversation = Conversation(user_id=user.id, is_active=True)
+                conversation = Conversation(user_id=user.id, is_active=True, group_id=group_id)
                 session.add(conversation)
                 await session.flush()
                 logger.info(f"Created new conversation for user {telegram_id}")
 
             return conversation
 
-    async def end_conversation(self, telegram_id: int) -> None:
+    async def end_conversation(self, telegram_id: int, group_id: Optional[int] = None) -> None:
         """End active conversation for user."""
         async with self.session() as session:
             user_result = await session.execute(select(User).where(User.telegram_id == telegram_id))
             user = user_result.scalar_one_or_none()
 
             if user:
-                await session.execute(
-                    update(Conversation)
-                    .where(Conversation.user_id == user.id, Conversation.is_active == True)
-                    .values(is_active=False, ended_at=datetime.utcnow())
+                query = update(Conversation).where(
+                    Conversation.user_id == user.id,
+                    Conversation.is_active == True
                 )
+                if group_id:
+                    query = query.where(Conversation.group_id == group_id)
+                else:
+                    query = query.where(Conversation.group_id.is_(None))
+
+                await session.execute(query.values(is_active=False, ended_at=datetime.utcnow()))
 
     # Message operations
     async def add_message(
@@ -205,6 +243,12 @@ class Repository:
             await session.flush()
             return message
 
+    async def get_message_by_id(self, message_id: int) -> Optional[Message]:
+        """Get message by ID."""
+        async with self.session() as session:
+            result = await session.execute(select(Message).where(Message.id == message_id))
+            return result.scalar_one_or_none()
+
     async def get_conversation_messages(
         self, conversation_id: int, limit: Optional[int] = None
     ) -> List[Message]:
@@ -221,7 +265,7 @@ class Repository:
 
             result = await session.execute(query)
             messages = list(result.scalars().all())
-            return list(reversed(messages))  # Return in chronological order
+            return list(reversed(messages))
 
     async def get_user_usage_stats(self, telegram_id: int) -> dict:
         """Get usage statistics for a user."""
@@ -242,6 +286,227 @@ class Repository:
                 "selected_model": user.selected_model,
                 "member_since": user.created_at.isoformat() if user.created_at else None,
             }
+
+    # Persona operations
+    async def get_preset_personas(self) -> List[Persona]:
+        """Get all preset personas."""
+        async with self.session() as session:
+            result = await session.execute(select(Persona).where(Persona.is_preset == True))
+            return list(result.scalars().all())
+
+    async def get_user_personas(self, telegram_id: int) -> List[Persona]:
+        """Get user's custom personas."""
+        async with self.session() as session:
+            user = await session.execute(select(User).where(User.telegram_id == telegram_id))
+            user = user.scalar_one_or_none()
+            if not user:
+                return []
+            result = await session.execute(
+                select(Persona).where(Persona.user_id == user.id)
+            )
+            return list(result.scalars().all())
+
+    async def get_active_persona(self, telegram_id: int) -> Optional[Persona]:
+        """Get user's active persona."""
+        async with self.session() as session:
+            user = await session.execute(select(User).where(User.telegram_id == telegram_id))
+            user = user.scalar_one_or_none()
+            if not user:
+                return None
+            result = await session.execute(
+                select(Persona).where(
+                    ((Persona.user_id == user.id) | (Persona.is_preset == True)),
+                    Persona.is_active == True
+                )
+            )
+            return result.scalar_one_or_none()
+
+    async def set_active_persona(self, telegram_id: int, persona_id: int) -> bool:
+        """Set user's active persona."""
+        async with self.session() as session:
+            user = await session.execute(select(User).where(User.telegram_id == telegram_id))
+            user = user.scalar_one_or_none()
+            if not user:
+                return False
+
+            # Deactivate all personas for user
+            await session.execute(
+                update(Persona).where(Persona.user_id == user.id).values(is_active=False)
+            )
+
+            # Activate selected persona
+            await session.execute(
+                update(Persona).where(Persona.id == persona_id).values(is_active=True)
+            )
+            return True
+
+    async def create_persona(
+        self, telegram_id: int, name: str, system_prompt: str
+    ) -> Optional[Persona]:
+        """Create custom persona for user."""
+        async with self.session() as session:
+            user = await session.execute(select(User).where(User.telegram_id == telegram_id))
+            user = user.scalar_one_or_none()
+            if not user:
+                return None
+
+            persona = Persona(user_id=user.id, name=name, system_prompt=system_prompt)
+            session.add(persona)
+            await session.flush()
+            return persona
+
+    async def delete_persona(self, telegram_id: int, persona_id: int) -> bool:
+        """Delete user's custom persona."""
+        async with self.session() as session:
+            user = await session.execute(select(User).where(User.telegram_id == telegram_id))
+            user = user.scalar_one_or_none()
+            if not user:
+                return False
+
+            result = await session.execute(
+                delete(Persona).where(
+                    Persona.id == persona_id,
+                    Persona.user_id == user.id,
+                    Persona.is_preset == False
+                )
+            )
+            return result.rowcount > 0
+
+    # Favorites operations
+    async def add_favorite(
+        self, telegram_id: int, message_id: int, tags: Optional[str] = None
+    ) -> Optional[Favorite]:
+        """Add message to favorites."""
+        async with self.session() as session:
+            user = await session.execute(select(User).where(User.telegram_id == telegram_id))
+            user = user.scalar_one_or_none()
+            if not user:
+                return None
+
+            favorite = Favorite(user_id=user.id, message_id=message_id, tags=tags)
+            session.add(favorite)
+            await session.flush()
+            return favorite
+
+    async def get_favorites(self, telegram_id: int, limit: int = 20) -> List[Favorite]:
+        """Get user's favorites."""
+        async with self.session() as session:
+            user = await session.execute(select(User).where(User.telegram_id == telegram_id))
+            user = user.scalar_one_or_none()
+            if not user:
+                return []
+
+            result = await session.execute(
+                select(Favorite)
+                .where(Favorite.user_id == user.id)
+                .options(selectinload(Favorite.message))
+                .order_by(Favorite.created_at.desc())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
+
+    async def remove_favorite(self, telegram_id: int, favorite_id: int) -> bool:
+        """Remove from favorites."""
+        async with self.session() as session:
+            user = await session.execute(select(User).where(User.telegram_id == telegram_id))
+            user = user.scalar_one_or_none()
+            if not user:
+                return False
+
+            result = await session.execute(
+                delete(Favorite).where(
+                    Favorite.id == favorite_id,
+                    Favorite.user_id == user.id
+                )
+            )
+            return result.rowcount > 0
+
+    # Group settings operations
+    async def get_or_create_group_settings(
+        self, group_id: int, group_name: Optional[str] = None
+    ) -> GroupSettings:
+        """Get or create group settings."""
+        async with self.session() as session:
+            result = await session.execute(
+                select(GroupSettings).where(GroupSettings.telegram_group_id == group_id)
+            )
+            settings = result.scalar_one_or_none()
+
+            if settings is None:
+                settings = GroupSettings(telegram_group_id=group_id, group_name=group_name)
+                session.add(settings)
+                await session.flush()
+
+            return settings
+
+    async def update_group_settings(
+        self,
+        group_id: int,
+        is_enabled: Optional[bool] = None,
+        rate_limit: Optional[int] = None,
+        persona_id: Optional[int] = None,
+    ) -> None:
+        """Update group settings."""
+        async with self.session() as session:
+            values = {}
+            if is_enabled is not None:
+                values["is_enabled"] = is_enabled
+            if rate_limit is not None:
+                values["rate_limit_messages"] = rate_limit
+            if persona_id is not None:
+                values["persona_id"] = persona_id
+
+            if values:
+                await session.execute(
+                    update(GroupSettings)
+                    .where(GroupSettings.telegram_group_id == group_id)
+                    .values(**values)
+                )
+
+    # Document operations
+    async def save_document(
+        self, user_id: int, filename: str, content: str, file_type: str
+    ) -> Document:
+        """Save uploaded document."""
+        async with self.session() as session:
+            user = await session.execute(select(User).where(User.telegram_id == user_id))
+            user = user.scalar_one_or_none()
+            if not user:
+                raise ValueError("User not found")
+
+            # Deactivate previous documents
+            await session.execute(
+                update(Document)
+                .where(Document.user_id == user.id)
+                .values(is_active=False)
+            )
+
+            doc = Document(
+                user_id=user.id,
+                filename=filename,
+                content=content,
+                file_type=file_type,
+                is_active=True,
+            )
+            session.add(doc)
+            await session.flush()
+            return doc
+
+    async def get_active_document(self, telegram_id: int) -> Optional[Document]:
+        """Get user's active document."""
+        async with self.session() as session:
+            user = await session.execute(select(User).where(User.telegram_id == telegram_id))
+            user = user.scalar_one_or_none()
+            if not user:
+                return None
+
+            result = await session.execute(
+                select(Document).where(
+                    Document.user_id == user.id,
+                    Document.is_active == True
+                )
+            )
+            return result.scalar_one_or_none()
 
 
 # Global repository instance
@@ -264,4 +529,3 @@ async def close_repository() -> None:
     if _repository is not None:
         await _repository.close()
         _repository = None
-

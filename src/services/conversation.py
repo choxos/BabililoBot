@@ -5,12 +5,13 @@ from typing import List, Optional
 
 from src.config import get_settings
 from src.database.repository import Repository
+from src.database.models import Message
 from src.services.openrouter import ChatMessage
 
 logger = logging.getLogger(__name__)
 
-# System prompt for the assistant
-SYSTEM_PROMPT = """You are BabililoBot, a helpful, friendly, and intelligent AI assistant. You engage in natural conversations, answer questions accurately, and help users with various tasks. Be concise but thorough in your responses. If you don't know something, say so honestly."""
+# Default system prompt
+DEFAULT_SYSTEM_PROMPT = """You are BabililoBot, a helpful, friendly, and intelligent AI assistant. You engage in natural conversations, answer questions accurately, and help users with various tasks. Be concise but thorough in your responses. If you don't know something, say so honestly."""
 
 
 class ConversationManager:
@@ -20,37 +21,60 @@ class ConversationManager:
         self.repository = repository
         self.settings = get_settings()
         self.context_size = self.settings.conversation_context_size
+        self._document_context: dict[int, str] = {}  # user_id -> document content
+
+    def set_document_context(self, user_id: int, content: str) -> None:
+        """Set document context for a user."""
+        self._document_context[user_id] = content
+
+    def clear_document_context(self, user_id: int) -> None:
+        """Clear document context for a user."""
+        self._document_context.pop(user_id, None)
+
+    def get_document_context(self, user_id: int) -> Optional[str]:
+        """Get document context for a user."""
+        return self._document_context.get(user_id)
+
+    async def _get_system_prompt(self, telegram_id: int) -> str:
+        """Get system prompt for user (considering active persona)."""
+        try:
+            persona = await self.repository.get_active_persona(telegram_id)
+            if persona:
+                return persona.system_prompt
+        except Exception as e:
+            logger.error(f"Error getting persona: {e}")
+
+        return DEFAULT_SYSTEM_PROMPT
 
     async def get_context_messages(
         self,
         telegram_id: int,
         include_system: bool = True,
+        group_id: Optional[int] = None,
     ) -> List[ChatMessage]:
-        """Get conversation context messages for a user.
-
-        Args:
-            telegram_id: User's Telegram ID
-            include_system: Whether to include system prompt
-
-        Returns:
-            List of ChatMessage objects for API context
-        """
+        """Get conversation context messages for a user."""
         messages: List[ChatMessage] = []
 
         # Add system prompt
         if include_system:
-            messages.append(ChatMessage(role="system", content=SYSTEM_PROMPT))
+            system_prompt = await self._get_system_prompt(telegram_id)
+
+            # Add document context if available
+            doc_context = self.get_document_context(telegram_id)
+            if doc_context:
+                system_prompt += f"\n\n[Document Context]\nThe user has uploaded a document. Use this content to answer their questions:\n\n{doc_context[:10000]}"
+
+            messages.append(ChatMessage(role="system", content=system_prompt))
 
         try:
-            # Get active conversation
-            conversation = await self.repository.get_or_create_active_conversation(telegram_id)
+            conversation = await self.repository.get_or_create_active_conversation(
+                telegram_id, group_id=group_id
+            )
 
-            # Get recent messages
             db_messages = await self.repository.get_conversation_messages(
                 conversation.id, limit=self.context_size
             )
 
-            # Convert to ChatMessage objects
             for msg in db_messages:
                 messages.append(ChatMessage(role=msg.role, content=msg.content))
 
@@ -63,17 +87,12 @@ class ConversationManager:
         self,
         telegram_id: int,
         content: str,
+        group_id: Optional[int] = None,
     ) -> int:
-        """Add user message to conversation.
-
-        Args:
-            telegram_id: User's Telegram ID
-            content: Message content
-
-        Returns:
-            Conversation ID
-        """
-        conversation = await self.repository.get_or_create_active_conversation(telegram_id)
+        """Add user message to conversation."""
+        conversation = await self.repository.get_or_create_active_conversation(
+            telegram_id, group_id=group_id
+        )
         await self.repository.add_message(
             conversation_id=conversation.id,
             role="user",
@@ -88,68 +107,43 @@ class ConversationManager:
         content: str,
         tokens_used: Optional[int] = None,
         model_used: Optional[str] = None,
-    ) -> None:
-        """Add assistant response to conversation.
-
-        Args:
-            telegram_id: User's Telegram ID
-            content: Response content
-            tokens_used: Tokens used for this response
-            model_used: Model that generated the response
-        """
-        conversation = await self.repository.get_or_create_active_conversation(telegram_id)
-        await self.repository.add_message(
+        group_id: Optional[int] = None,
+    ) -> Optional[Message]:
+        """Add assistant response to conversation."""
+        conversation = await self.repository.get_or_create_active_conversation(
+            telegram_id, group_id=group_id
+        )
+        message = await self.repository.add_message(
             conversation_id=conversation.id,
             role="assistant",
             content=content,
             tokens_used=tokens_used,
             model_used=model_used,
         )
+        return message
 
-    async def clear_conversation(self, telegram_id: int) -> None:
-        """Clear user's conversation and start fresh.
-
-        Args:
-            telegram_id: User's Telegram ID
-        """
-        await self.repository.end_conversation(telegram_id)
+    async def clear_conversation(
+        self, telegram_id: int, group_id: Optional[int] = None
+    ) -> None:
+        """Clear user's conversation and start fresh."""
+        await self.repository.end_conversation(telegram_id, group_id=group_id)
         logger.info(f"Cleared conversation for user {telegram_id}")
 
     async def build_api_messages(
         self,
         telegram_id: int,
         new_message: str,
+        group_id: Optional[int] = None,
     ) -> List[ChatMessage]:
-        """Build complete message list for API call.
-
-        This gets the context and appends the new user message.
-
-        Args:
-            telegram_id: User's Telegram ID
-            new_message: New message from user
-
-        Returns:
-            Complete list of messages for API
-        """
-        # Get existing context
-        messages = await self.get_context_messages(telegram_id, include_system=True)
-
-        # Add new user message
+        """Build complete message list for API call."""
+        messages = await self.get_context_messages(
+            telegram_id, include_system=True, group_id=group_id
+        )
         messages.append(ChatMessage(role="user", content=new_message))
-
         return messages
 
     def estimate_tokens(self, messages: List[ChatMessage]) -> int:
-        """Estimate token count for messages.
-
-        Uses rough estimate of 4 characters per token.
-
-        Args:
-            messages: List of messages
-
-        Returns:
-            Estimated token count
-        """
+        """Estimate token count for messages."""
         total_chars = sum(len(m.content) for m in messages)
         return total_chars // 4
 
@@ -158,33 +152,20 @@ class ConversationManager:
         messages: List[ChatMessage],
         max_tokens: int = 4000,
     ) -> List[ChatMessage]:
-        """Trim context if it exceeds token limit.
-
-        Keeps system prompt and most recent messages.
-
-        Args:
-            messages: List of messages
-            max_tokens: Maximum tokens allowed
-
-        Returns:
-            Trimmed message list
-        """
+        """Trim context if it exceeds token limit."""
         estimated = self.estimate_tokens(messages)
 
         if estimated <= max_tokens:
             return messages
 
-        # Keep system prompt (first message) and trim from the middle
         if len(messages) <= 2:
             return messages
 
         system_msg = messages[0] if messages[0].role == "system" else None
         other_msgs = messages[1:] if system_msg else messages
 
-        # Remove oldest messages until under limit
         while self.estimate_tokens(messages) > max_tokens and len(other_msgs) > 2:
             other_msgs = other_msgs[1:]
             messages = [system_msg] + other_msgs if system_msg else other_msgs
 
         return messages
-
