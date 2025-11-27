@@ -92,47 +92,65 @@ class ExportHandler:
             await query.answer("Failed to generate file", show_alert=True)
 
     def _parse_markdown_content(self, text: str) -> List[dict]:
-        """Parse markdown content into structured blocks.
-        
-        Returns list of dicts with 'type' (text/code/heading) and 'content'.
-        """
+        """Parse markdown content into structured blocks."""
         blocks = []
         lines = text.split('\n')
-        current_block = {'type': 'text', 'content': [], 'language': ''}
+        current_block = {'type': 'text', 'content': [], 'language': '', 'level': 0}
         in_code_block = False
         code_language = ''
 
         for line in lines:
+            stripped = line.strip()
+            
             # Check for code block start/end
-            if line.strip().startswith('```'):
+            if stripped.startswith('```'):
                 if not in_code_block:
                     # Save current text block
                     if current_block['content']:
                         current_block['content'] = '\n'.join(current_block['content'])
                         blocks.append(current_block)
                     
-                    # Start code block
                     in_code_block = True
-                    code_language = line.strip()[3:].strip()
-                    current_block = {'type': 'code', 'content': [], 'language': code_language}
+                    code_language = stripped[3:].strip()
+                    current_block = {'type': 'code', 'content': [], 'language': code_language, 'level': 0}
                 else:
-                    # End code block
                     in_code_block = False
                     current_block['content'] = '\n'.join(current_block['content'])
                     blocks.append(current_block)
-                    current_block = {'type': 'text', 'content': [], 'language': ''}
-            elif in_code_block:
+                    current_block = {'type': 'text', 'content': [], 'language': '', 'level': 0}
+                continue
+                    
+            if in_code_block:
                 current_block['content'].append(line)
-            else:
-                # Check for headings
-                if line.startswith('**') and line.endswith('**') and len(line) > 4:
+                continue
+            
+            # Check for markdown headers (# ## ### etc.)
+            header_match = re.match(r'^(#{1,6})\s+(.+)$', line)
+            if header_match:
+                # Save current block
+                if current_block['content']:
+                    current_block['content'] = '\n'.join(current_block['content'])
+                    blocks.append(current_block)
+                    current_block = {'type': 'text', 'content': [], 'language': '', 'level': 0}
+                
+                level = len(header_match.group(1))
+                header_text = header_match.group(2).strip()
+                blocks.append({'type': 'heading', 'content': header_text, 'language': '', 'level': level})
+                continue
+            
+            # Check for bold headers like **Header**
+            if stripped.startswith('**') and stripped.endswith('**') and len(stripped) > 4:
+                inner = stripped[2:-2]
+                if inner and not '**' in inner:
                     if current_block['content']:
                         current_block['content'] = '\n'.join(current_block['content'])
                         blocks.append(current_block)
-                        current_block = {'type': 'text', 'content': [], 'language': ''}
-                    blocks.append({'type': 'heading', 'content': line.strip('*'), 'language': ''})
-                else:
-                    current_block['content'].append(line)
+                        current_block = {'type': 'text', 'content': [], 'language': '', 'level': 0}
+                    blocks.append({'type': 'heading', 'content': inner, 'language': '', 'level': 2})
+                    continue
+
+            # Regular text
+            current_block['content'].append(line)
 
         # Don't forget the last block
         if current_block['content']:
@@ -145,11 +163,11 @@ class ExportHandler:
     async def _export_pdf(
         self, query, user_prompt: Optional[str], response: str, timestamp: str
     ) -> None:
-        """Generate and send PDF file with proper code block formatting."""
+        """Generate and send PDF file with proper formatting."""
         try:
             from reportlab.lib.pagesizes import letter
             from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-            from reportlab.lib.colors import HexColor, Color
+            from reportlab.lib.colors import HexColor
             from reportlab.platypus import (
                 SimpleDocTemplate, Paragraph, Spacer, HRFlowable,
                 Preformatted, Table, TableStyle
@@ -207,15 +225,38 @@ class ExportHandler:
                 fontName='Helvetica',
             )
 
-            heading_style = ParagraphStyle(
-                'ContentHeading',
-                parent=styles['Normal'],
-                fontSize=11,
+            # Heading styles for different levels
+            h1_style = ParagraphStyle(
+                'H1',
+                parent=styles['Heading1'],
+                fontSize=16,
+                leading=20,
+                spaceAfter=10,
+                spaceBefore=16,
+                fontName='Helvetica-Bold',
+                textColor=HexColor('#1a1a2e'),
+            )
+
+            h2_style = ParagraphStyle(
+                'H2',
+                parent=styles['Heading2'],
+                fontSize=14,
+                leading=18,
+                spaceAfter=8,
+                spaceBefore=14,
+                fontName='Helvetica-Bold',
+                textColor=HexColor('#2d3436'),
+            )
+
+            h3_style = ParagraphStyle(
+                'H3',
+                parent=styles['Heading3'],
+                fontSize=12,
                 leading=16,
                 spaceAfter=6,
                 spaceBefore=12,
                 fontName='Helvetica-Bold',
-                textColor=HexColor('#16213e'),
+                textColor=HexColor('#444444'),
             )
 
             code_style = ParagraphStyle(
@@ -224,12 +265,6 @@ class ExportHandler:
                 fontSize=9,
                 leading=12,
                 fontName='Courier',
-                backColor=HexColor('#f4f4f4'),
-                borderColor=HexColor('#e0e0e0'),
-                borderWidth=1,
-                borderPadding=8,
-                leftIndent=0,
-                rightIndent=0,
             )
 
             meta_style = ParagraphStyle(
@@ -238,6 +273,14 @@ class ExportHandler:
                 fontSize=9,
                 textColor=HexColor('#888888'),
             )
+
+            def get_heading_style(level: int):
+                if level == 1:
+                    return h1_style
+                elif level == 2:
+                    return h2_style
+                else:
+                    return h3_style
 
             # Build document
             story = []
@@ -260,34 +303,30 @@ class ExportHandler:
             # AI Response
             story.append(Paragraph("🤖 AI Response", response_label_style))
 
-            # Parse and format response with code blocks
+            # Parse and format response
             blocks = self._parse_markdown_content(response)
 
             for block in blocks:
                 if block['type'] == 'code':
-                    # Code block with background
                     story.append(Spacer(1, 0.1 * inch))
                     
-                    # Language label if present
                     if block['language']:
                         lang_style = ParagraphStyle(
                             'LangLabel',
                             fontSize=8,
                             textColor=HexColor('#666666'),
-                            fontName='Helvetica',
+                            fontName='Helvetica-Oblique',
                         )
-                        story.append(Paragraph(f"<i>{block['language']}</i>", lang_style))
+                        story.append(Paragraph(f"{block['language']}", lang_style))
                     
-                    # Code content in a table for background
                     code_text = block['content']
                     code_text = code_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                     
-                    # Create a table with background color for code
                     code_para = Preformatted(code_text, code_style)
                     t = Table([[code_para]], colWidths=[6.8 * inch])
                     t.setStyle(TableStyle([
-                        ('BACKGROUND', (0, 0), (-1, -1), HexColor('#f8f8f8')),
-                        ('BOX', (0, 0), (-1, -1), 1, HexColor('#e0e0e0')),
+                        ('BACKGROUND', (0, 0), (-1, -1), HexColor('#f5f5f5')),
+                        ('BOX', (0, 0), (-1, -1), 1, HexColor('#ddd')),
                         ('LEFTPADDING', (0, 0), (-1, -1), 10),
                         ('RIGHTPADDING', (0, 0), (-1, -1), 10),
                         ('TOPPADDING', (0, 0), (-1, -1), 8),
@@ -297,22 +336,31 @@ class ExportHandler:
                     story.append(Spacer(1, 0.1 * inch))
 
                 elif block['type'] == 'heading':
-                    story.append(Paragraph(block['content'], heading_style))
+                    level = block.get('level', 2)
+                    style = get_heading_style(level)
+                    heading_text = block['content']
+                    heading_text = heading_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    story.append(Paragraph(heading_text, style))
 
                 else:
                     # Regular text
                     text = block['content']
                     if text.strip():
                         text_escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        
                         # Handle inline code
                         text_escaped = re.sub(
                             r'`([^`]+)`',
-                            r'<font face="Courier" size="9" color="#c7254e">\1</font>',
+                            r'<font face="Courier" size="9" color="#c7254e" backColor="#f9f2f4">\1</font>',
                             text_escaped
                         )
                         # Handle bold
                         text_escaped = re.sub(r'\*\*([^*]+)\*\*', r'<b>\1</b>', text_escaped)
+                        # Handle italic
+                        text_escaped = re.sub(r'\*([^*]+)\*', r'<i>\1</i>', text_escaped)
+                        # Handle line breaks
                         text_escaped = text_escaped.replace("\n", "<br/>")
+                        
                         story.append(Paragraph(text_escaped, content_style))
 
             # Footer
@@ -326,7 +374,7 @@ class ExportHandler:
 
             await query.message.reply_document(
                 document=InputFile(buffer, filename=f"babililo_{timestamp}.pdf"),
-                caption="📄 PDF exported with formatted code blocks!",
+                caption="📄 PDF exported!",
             )
 
         except ImportError as e:
@@ -339,7 +387,7 @@ class ExportHandler:
     async def _export_markdown(
         self, query, user_prompt: Optional[str], response: str, timestamp: str
     ) -> None:
-        """Generate and send Markdown file with prompt and response."""
+        """Generate and send Markdown file."""
         lines = [
             "# BabililoBot Export",
             "",
@@ -377,7 +425,7 @@ class ExportHandler:
         )
 
     async def export_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /export command to export full conversation history."""
+        """Handle /export command."""
         if not update.effective_user or not update.message:
             return
 
