@@ -1,122 +1,131 @@
 # BabililoBot
 
-Enterprise-ready Telegram chatbot powered by OpenRouter LLM models.
+Enterprise-ready Telegram chatbot powered by OpenRouter LLM models with 10+ features.
 
 ## Features
 
-- **Multiple Free LLM Models**: Choose from various free models including Gemma, Llama, Mistral, Qwen, DeepSeek, Phi, and Grok
-- **Conversation Memory**: Maintains context across messages within a session
-- **PostgreSQL Persistence**: All conversations and user data stored in database
-- **Rate Limiting**: Token bucket algorithm to prevent abuse
-- **Admin Commands**: Broadcast messages, ban/unban users, view statistics
-- **Docker Ready**: Easy deployment with Docker Compose
+### Core
+- **Multiple Free LLM Models**: Gemma, Llama, Mistral, Qwen, DeepSeek, Phi, Grok
+- **Streaming Responses**: Real-time text with typing effect
+- **Conversation Memory**: Context-aware conversations
+- **PostgreSQL Persistence**: Enterprise-grade data storage
+
+### New Features
+- **🔍 Inline Mode**: Use `@babililobot` in any chat
+- **📄 Export**: Download responses as PDF/TXT/Markdown
+- **🎤 Voice**: Send voice messages, get audio replies
+- **🎭 Personas**: Custom AI personalities (Coder, Writer, Tutor, etc.)
+- **⭐ Favorites**: Save and recall best responses
+- **👥 Groups**: Mention bot in group chats
+- **🌐 Web Search**: Real-time internet search
+- **📚 Documents**: Upload PDF/DOCX for Q&A
+- **🎨 Images**: Generate images with `/imagine`
+- **🛡️ Admin Tools**: Ban users, broadcast messages, stats
 
 ## Quick Start
 
+### Docker Deployment (Recommended)
+
+```bash
+git clone https://github.com/choxos/BabililoBot.git
+cd BabililoBot
+
+# Create .env file
+cat > .env << 'EOF'
+TELEGRAM_BOT_TOKEN=your_token_here
+OPENROUTER_API_KEY=your_api_key_here
+OPENROUTER_DEFAULT_MODEL=google/gemma-3-27b-it:free
+DATABASE_URL=postgresql+asyncpg://babililo:babililo_secret@postgres:5432/babililo_db
+ADMIN_USER_IDS=[your_telegram_id]
+EOF
+
+# Start
+docker-compose up -d
+
+# View logs
+docker-compose logs -f bot
+```
+
 ### Local Development
 
-1. Clone the repository and install dependencies:
 ```bash
 pip install -r requirements.txt
-```
 
-2. Copy `.env.example` to `.env` and fill in your credentials:
-```bash
-cp .env.example .env
-```
+# Use SQLite for local testing
+export DATABASE_URL=sqlite+aiosqlite:///babililo.db
 
-3. Start PostgreSQL (or use Docker):
-```bash
-docker run -d --name babililo_postgres \
-  -e POSTGRES_USER=babililo \
-  -e POSTGRES_PASSWORD=babililo_secret \
-  -e POSTGRES_DB=babililo_db \
-  -p 5432:5432 \
-  postgres:16-alpine
-```
-
-4. Run the bot:
-```bash
 python -m src.main
-```
-
-### Docker Deployment
-
-1. Copy `.env.example` to `.env` and configure:
-```bash
-cp .env.example .env
-# Edit .env with your tokens
-```
-
-2. Start with Docker Compose:
-```bash
-docker-compose up -d
-```
-
-3. View logs:
-```bash
-docker-compose logs -f bot
 ```
 
 ## Commands
 
-### User Commands
 | Command | Description |
 |---------|-------------|
-| `/start` | Start the bot and register |
-| `/help` | Show available commands |
-| `/model` | View or change AI model |
-| `/clear` | Clear conversation history |
-| `/usage` | View your usage statistics |
+| `/start` | Start the bot |
+| `/help` | Show all commands |
+| `/model` | Change AI model |
+| `/persona` | Set AI personality |
+| `/search <query>` | Web search |
+| `/imagine <prompt>` | Generate image |
+| `/voice on/off` | Toggle voice replies |
+| `/doc` | Document Q&A info |
+| `/export` | Export conversation |
+| `/favorites` | View saved responses |
+| `/clear` | Clear history |
+| `/usage` | Your statistics |
 
 ### Admin Commands
 | Command | Description |
 |---------|-------------|
-| `/stats` | View bot statistics |
-| `/broadcast <msg>` | Send message to all users |
-| `/ban <user_id>` | Ban a user |
-| `/unban <user_id>` | Unban a user |
-| `/users` | List recent users |
+| `/stats` | Bot statistics |
+| `/broadcast <msg>` | Message all users |
+| `/ban <user_id>` | Ban user |
+| `/unban <user_id>` | Unban user |
+| `/users` | List users |
+| `/groupsettings` | Group settings |
+
+## Inline Mode
+
+Type `@babililobot your question` in any chat to get AI responses!
+
+## Group Chats
+
+- Mention `@babililobot` or reply to the bot
+- Use `/groupsettings` to configure (admin only)
 
 ## Configuration
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token | Required |
-| `OPENROUTER_API_KEY` | OpenRouter API key | Required |
-| `OPENROUTER_DEFAULT_MODEL` | Default LLM model | `google/gemma-3-27b-it:free` |
-| `DATABASE_URL` | PostgreSQL connection URL | See .env.example |
-| `ADMIN_USER_IDS` | JSON array of admin Telegram IDs | `[]` |
-| `RATE_LIMIT_MESSAGES` | Messages allowed per window | `10` |
-| `RATE_LIMIT_WINDOW_SECONDS` | Rate limit window in seconds | `60` |
-| `CONVERSATION_CONTEXT_SIZE` | Messages to keep in context | `20` |
-| `LOG_LEVEL` | Logging level | `INFO` |
+| Variable | Description |
+|----------|-------------|
+| `TELEGRAM_BOT_TOKEN` | Bot token from BotFather |
+| `OPENROUTER_API_KEY` | OpenRouter API key |
+| `DATABASE_URL` | PostgreSQL connection URL |
+| `ADMIN_USER_IDS` | JSON array of admin IDs |
+| `RATE_LIMIT_MESSAGES` | Messages per window (default: 10) |
+| `CONVERSATION_CONTEXT_SIZE` | Context messages (default: 20) |
 
-## Available Models
+## Architecture
 
-The bot supports these free models from OpenRouter:
-
-- `google/gemma-3-27b-it:free` - Gemma 3 27B
-- `google/gemma-3-12b-it:free` - Gemma 3 12B
-- `meta-llama/llama-4-scout:free` - Llama 4 Scout
-- `meta-llama/llama-4-maverick:free` - Llama 4 Maverick
-- `mistralai/mistral-small-3.1-24b-instruct:free` - Mistral Small 3.1
-- `qwen/qwen3-32b:free` - Qwen 3 32B
-- `qwen/qwen3-14b:free` - Qwen 3 14B
-- `deepseek/deepseek-r1-0528:free` - DeepSeek R1
-- `microsoft/phi-4:free` - Phi 4
-- `x-ai/grok-4.1-fast:free` - Grok 4.1 Fast
-
-## Database Migrations
-
-Run migrations with Alembic:
-```bash
-alembic upgrade head
 ```
-
-Create new migration:
-```bash
-alembic revision --autogenerate -m "description"
+src/
+├── bot/handlers/     # Telegram handlers
+│   ├── chat.py       # Main chat with streaming
+│   ├── commands.py   # User commands
+│   ├── admin.py      # Admin commands
+│   ├── inline.py     # Inline queries
+│   ├── voice.py      # Voice messages
+│   ├── documents.py  # Document Q&A
+│   ├── groups.py     # Group chat
+│   └── export.py     # PDF/TXT export
+├── services/         # Business logic
+│   ├── openrouter.py # LLM API client
+│   ├── conversation.py
+│   ├── web_search.py
+│   └── image_gen.py
+├── database/         # Persistence
+│   ├── models.py
+│   └── repository.py
+└── main.py           # Entry point
 ```
 
 ## License
