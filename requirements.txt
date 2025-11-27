@@ -15,3 +15,7 @@ gtts>=2.5.0
 duckduckgo-search>=6.0.0
 Pillow>=10.0.0
 aiofiles>=24.1.0
+
+# Voice transcription
+SpeechRecognition>=3.10.0
+pydub>=0.25.1
