@@ -39,7 +39,7 @@ class ChatHandler:
         keyboard = [
             [
                 InlineKeyboardButton("📄 PDF", callback_data=f"export:pdf:{message_id}"),
-                InlineKeyboardButton("📝 TXT", callback_data=f"export:txt:{message_id}"),
+                InlineKeyboardButton("📝 MD", callback_data=f"export:md:{message_id}"),
                 InlineKeyboardButton("⭐ Save", callback_data=f"fav:add:{message_id}"),
             ],
             [

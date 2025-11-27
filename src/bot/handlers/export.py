@@ -1,9 +1,9 @@
-"""Export handler for PDF/TXT/Markdown generation."""
+"""Export handler for PDF/Markdown generation."""
 
 import io
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
 
 from telegram import Update, InputFile
 from telegram.ext import ContextTypes
@@ -14,10 +14,45 @@ logger = logging.getLogger(__name__)
 
 
 class ExportHandler:
-    """Handles exporting messages to PDF, TXT, and Markdown formats."""
+    """Handles exporting messages to PDF and Markdown formats."""
 
     def __init__(self, repository: Repository):
         self.repository = repository
+
+    async def _get_prompt_and_response(self, message_id: int) -> Tuple[Optional[str], Optional[str]]:
+        """Get the user prompt and assistant response for a message.
+        
+        Returns:
+            Tuple of (user_prompt, assistant_response)
+        """
+        try:
+            # Get the assistant message
+            message = await self.repository.get_message_by_id(message_id)
+            if not message:
+                return None, None
+
+            # Get conversation messages to find the preceding user message
+            messages = await self.repository.get_conversation_messages(
+                message.conversation_id, limit=50
+            )
+
+            # Find the user message before this assistant message
+            user_prompt = None
+            assistant_response = message.content
+
+            for i, msg in enumerate(messages):
+                if msg.id == message_id and i > 0:
+                    # Look for the user message before this one
+                    for j in range(i - 1, -1, -1):
+                        if messages[j].role == "user":
+                            user_prompt = messages[j].content
+                            break
+                    break
+
+            return user_prompt, assistant_response
+        except Exception as e:
+            logger.error(f"Error getting prompt and response: {e}")
+            return None, None
 
     async def handle_export_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle export button callbacks."""
@@ -40,23 +75,28 @@ class ExportHandler:
             await query.answer("Invalid message ID", show_alert=True)
             return
 
-        # Get the message content from the replied message
-        original_message = query.message
-        if not original_message or not original_message.text:
-            await query.answer("No message to export", show_alert=True)
-            return
+        # Get prompt and response from database
+        user_prompt, assistant_response = await self._get_prompt_and_response(message_id)
 
-        content = original_message.text
-        user = update.effective_user
+        # Fallback to message text if database lookup fails
+        if not assistant_response:
+            original_message = query.message
+            if not original_message or not original_message.text:
+                await query.answer("No message to export", show_alert=True)
+                return
+            assistant_response = original_message.text
+            user_prompt = None
+
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
         try:
             if format_type == "pdf":
-                await self._export_pdf(query, content, timestamp)
+                await self._export_pdf(query, user_prompt, assistant_response, timestamp)
             elif format_type == "txt":
-                await self._export_txt(query, content, timestamp)
+                # Changed to markdown
+                await self._export_markdown(query, user_prompt, assistant_response, timestamp)
             elif format_type == "md":
-                await self._export_markdown(query, content, timestamp)
+                await self._export_markdown(query, user_prompt, assistant_response, timestamp)
             else:
                 await query.answer("Unknown format", show_alert=True)
 
@@ -64,93 +104,157 @@ class ExportHandler:
             logger.error(f"Export error: {e}")
             await query.answer("Failed to generate file", show_alert=True)
 
-    async def _export_pdf(self, query, content: str, timestamp: str) -> None:
-        """Generate and send PDF file."""
+    async def _export_pdf(
+        self, query, user_prompt: Optional[str], response: str, timestamp: str
+    ) -> None:
+        """Generate and send PDF file with prompt and response."""
         try:
             from reportlab.lib.pagesizes import letter
             from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+            from reportlab.lib.colors import HexColor
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
             from reportlab.lib.units import inch
 
             buffer = io.BytesIO()
-            doc = SimpleDocTemplate(buffer, pagesize=letter)
+            doc = SimpleDocTemplate(
+                buffer,
+                pagesize=letter,
+                leftMargin=0.75 * inch,
+                rightMargin=0.75 * inch,
+                topMargin=0.75 * inch,
+                bottomMargin=0.75 * inch,
+            )
             styles = getSampleStyleSheet()
 
-            # Create custom style for content
+            # Custom styles
+            title_style = ParagraphStyle(
+                'CustomTitle',
+                parent=styles['Heading1'],
+                fontSize=18,
+                spaceAfter=6,
+                textColor=HexColor('#2E86AB'),
+            )
+
+            prompt_label_style = ParagraphStyle(
+                'PromptLabel',
+                parent=styles['Heading2'],
+                fontSize=12,
+                textColor=HexColor('#A23B72'),
+                spaceAfter=6,
+                spaceBefore=12,
+            )
+
+            response_label_style = ParagraphStyle(
+                'ResponseLabel',
+                parent=styles['Heading2'],
+                fontSize=12,
+                textColor=HexColor('#2E86AB'),
+                spaceAfter=6,
+                spaceBefore=12,
+            )
+
             content_style = ParagraphStyle(
                 'Content',
                 parent=styles['Normal'],
                 fontSize=11,
-                leading=14,
-                spaceAfter=12,
+                leading=16,
+                spaceAfter=8,
+            )
+
+            meta_style = ParagraphStyle(
+                'Meta',
+                parent=styles['Normal'],
+                fontSize=9,
+                textColor=HexColor('#666666'),
             )
 
             # Build document
             story = []
 
-            # Title
-            story.append(Paragraph("BabililoBot Response", styles['Heading1']))
-            story.append(Spacer(1, 0.25 * inch))
-            story.append(Paragraph(f"Generated: {timestamp}", styles['Normal']))
-            story.append(Spacer(1, 0.5 * inch))
+            # Header
+            story.append(Paragraph("BabililoBot", title_style))
+            story.append(Paragraph(f"Generated: {timestamp.replace('_', ' ')}", meta_style))
+            story.append(Spacer(1, 0.3 * inch))
+            story.append(HRFlowable(width="100%", thickness=1, color=HexColor('#CCCCCC')))
+            story.append(Spacer(1, 0.2 * inch))
 
-            # Content - escape special characters and handle newlines
-            content_escaped = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            paragraphs = content_escaped.split("\n\n")
+            # User Prompt
+            if user_prompt:
+                story.append(Paragraph("💬 Your Question", prompt_label_style))
+                prompt_escaped = user_prompt.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                prompt_escaped = prompt_escaped.replace("\n", "<br/>")
+                story.append(Paragraph(prompt_escaped, content_style))
+                story.append(Spacer(1, 0.2 * inch))
+
+            # AI Response
+            story.append(Paragraph("🤖 AI Response", response_label_style))
+
+            response_escaped = response.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            paragraphs = response_escaped.split("\n\n")
             for para in paragraphs:
                 if para.strip():
-                    # Replace single newlines with <br/>
                     para = para.replace("\n", "<br/>")
                     story.append(Paragraph(para, content_style))
-                    story.append(Spacer(1, 0.1 * inch))
 
             doc.build(story)
             buffer.seek(0)
 
             await query.message.reply_document(
-                document=InputFile(buffer, filename=f"babililo_response_{timestamp}.pdf"),
-                caption="📄 Here's your PDF export!",
+                document=InputFile(buffer, filename=f"babililo_{timestamp}.pdf"),
+                caption="📄 PDF exported with your prompt and response!",
             )
 
         except ImportError:
-            # Fallback if reportlab not available
             await query.answer("PDF export not available", show_alert=True)
 
-    async def _export_txt(self, query, content: str, timestamp: str) -> None:
-        """Generate and send TXT file."""
-        header = f"BabililoBot Response\nGenerated: {timestamp}\n{'='*50}\n\n"
-        full_content = header + content
+    async def _export_markdown(
+        self, query, user_prompt: Optional[str], response: str, timestamp: str
+    ) -> None:
+        """Generate and send Markdown file with prompt and response."""
+        lines = [
+            "# BabililoBot Export",
+            "",
+            f"*Generated: {timestamp.replace('_', ' ')}*",
+            "",
+            "---",
+            "",
+        ]
 
-        buffer = io.BytesIO(full_content.encode('utf-8'))
+        if user_prompt:
+            lines.extend([
+                "## 💬 Your Question",
+                "",
+                user_prompt,
+                "",
+            ])
+
+        lines.extend([
+            "## 🤖 AI Response",
+            "",
+            response,
+            "",
+            "---",
+            "",
+            "*Powered by BabililoBot - https://t.me/babililobot*",
+        ])
+
+        content = "\n".join(lines)
+        buffer = io.BytesIO(content.encode('utf-8'))
         buffer.seek(0)
 
         await query.message.reply_document(
-            document=InputFile(buffer, filename=f"babililo_response_{timestamp}.txt"),
-            caption="📝 Here's your TXT export!",
-        )
-
-    async def _export_markdown(self, query, content: str, timestamp: str) -> None:
-        """Generate and send Markdown file."""
-        header = f"# BabililoBot Response\n\n*Generated: {timestamp}*\n\n---\n\n"
-        full_content = header + content
-
-        buffer = io.BytesIO(full_content.encode('utf-8'))
-        buffer.seek(0)
-
-        await query.message.reply_document(
-            document=InputFile(buffer, filename=f"babililo_response_{timestamp}.md"),
-            caption="📋 Here's your Markdown export!",
+            document=InputFile(buffer, filename=f"babililo_{timestamp}.md"),
+            caption="📝 Markdown exported with your prompt and response!",
         )
 
     async def export_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /export command to export conversation history."""
+        """Handle /export command to export full conversation history."""
         if not update.effective_user or not update.message:
             return
 
         user_id = update.effective_user.id
 
         try:
-            # Get user's conversation history
             conversation = await self.repository.get_or_create_active_conversation(user_id)
             messages = await self.repository.get_conversation_messages(conversation.id)
 
@@ -158,27 +262,43 @@ class ExportHandler:
                 await update.message.reply_text("No conversation history to export.")
                 return
 
-            # Build conversation text
-            content_lines = ["# Conversation History\n"]
-            for msg in messages:
-                role = "👤 You" if msg.role == "user" else "🤖 BabililoBot"
-                timestamp = msg.created_at.strftime("%Y-%m-%d %H:%M") if msg.created_at else ""
-                content_lines.append(f"\n## {role} ({timestamp})\n")
-                content_lines.append(msg.content + "\n")
+            # Build conversation markdown
+            lines = [
+                "# Conversation History",
+                "",
+                f"*Exported: {datetime.now().strftime('%Y-%m-%d %H:%M')}*",
+                "",
+                "---",
+                "",
+            ]
 
-            content = "\n".join(content_lines)
+            for msg in messages:
+                if msg.role == "user":
+                    lines.append("## 💬 You")
+                else:
+                    lines.append("## 🤖 BabililoBot")
+
+                if msg.created_at:
+                    lines.append(f"*{msg.created_at.strftime('%Y-%m-%d %H:%M')}*")
+                lines.append("")
+                lines.append(msg.content)
+                lines.append("")
+                lines.append("---")
+                lines.append("")
+
+            lines.append("*Powered by BabililoBot*")
+
+            content = "\n".join(lines)
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-            # Send as markdown file
             buffer = io.BytesIO(content.encode('utf-8'))
             buffer.seek(0)
 
             await update.message.reply_document(
                 document=InputFile(buffer, filename=f"babililo_conversation_{timestamp}.md"),
-                caption="📚 Here's your full conversation history!",
+                caption="📚 Full conversation exported!",
             )
 
         except Exception as e:
             logger.error(f"Export command error: {e}")
             await update.message.reply_text("Failed to export conversation.")
-
